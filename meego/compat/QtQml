@@ -1,0 +1,5 @@
+// Qt 4 stand-in for the Qt 5 module header: QtDeclarative is this Qt's QML
+// engine, and qmlRegisterType & friends live there.
+#pragma once
+#include <QtDeclarative>
+#include "QQmlEngine"

@@ -1,0 +1,17 @@
+Package: harbour-passviewer
+Version: @VERSION@
+Architecture: armel
+Maintainer: Sebastian Matkovich <sebastian.matkovich@gmail.com>
+Depends: libqtcore4, libqtgui4, libqt4-network, libqt4-sql, libqt4-sql-sqlite, libqt4-dbus, libqt4-declarative, libqtm-location, libmeegotouchcore0, qt-components, libbz2-1.0, liblzma2, zlib1g
+Section: user/office
+Priority: optional
+Description: Viewer for Passbook (.pkpass) files
+ Shows the passes found below the home directory with their fields and
+ barcode (QR, Aztec, PDF417, Code 128), highlights the ones close to their
+ time or place, and fetches updates from the issuer.
+ .
+ The MeeGo Harmattan edition of Christof Buergi's Sailfish app: Qt 4.7 with
+ com.nokia.meego instead of Silica.
+Maemo-Display-Name: Pass Viewer
+XB-Maemo-Icon-26:
+@ICON@

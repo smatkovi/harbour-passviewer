@@ -5,7 +5,9 @@ PassHandler::PassHandler(QObject *parent) :
     m_network(),
     m_replies()
 {
-    QObject::connect(&m_network, &QNetworkAccessManager::finished, this, &PassHandler::replyFinished);
+#if QT_VERSION >= 0x050000
+    QObject::connect(&m_network, SIGNAL(finished(QNetworkReply*)), this, SLOT(replyFinished(QNetworkReply*)));
+#endif
 }
 
 QString PassHandler::getCanonicalPath(QString path) {
@@ -35,19 +37,46 @@ void PassHandler::updatePass(QString path) {
         emit updateFinished("not updateable");
         return;
     }
-    // build the HTTP request
-    QNetworkRequest request(QUrl(baseURL + "/v1/passes/" + passID + "/" + serial));
-    request.setRawHeader("Authorization", QByteArray("ApplePass ") + auth.toUtf8());
+    QUrl url(baseURL + "/v1/passes/" + passID + "/" + serial);
     PassDB db;
     PassInfo* info = db.getPassInfo(passID + "/" + serial);
+    QByteArray since;
     if (!info->updated().isNull())
-        request.setRawHeader("If-Modified-Since", m_rfc2616(info->updated()));
+        since = m_rfc2616(info->updated());
     delete info;
-    // send the request
+#if QT_VERSION >= 0x050000
+    // build and send the HTTP request
+    QNetworkRequest request(url);
+    request.setRawHeader("Authorization", QByteArray("ApplePass ") + auth.toUtf8());
+    if (!since.isEmpty())
+        request.setRawHeader("If-Modified-Since", since);
     QNetworkReply* reply = m_network.get(request);
     m_replies.insert(reply, path);
+#else
+    // Qt 4 on Harmattan sits on OpenSSL 0.9.8, which no pass server of
+    // today accepts; the request goes through passviewer-fetch (meego/fetch),
+    // a static Rust helper with its own TLS, that writes the answer to a file.
+    QTemporaryFile* tmp = new QTemporaryFile(QDir::tempPath() + "/passviewer-update-XXXXXX", this);
+    if (!tmp->open()) {
+        delete tmp;
+        emit updateFinished("update failed");
+        return;
+    }
+    tmp->close();
+    QProcess* fetch = new QProcess(this);
+    Fetch job;
+    job.path = path;
+    job.file = tmp;
+    m_fetches.insert(fetch, job);
+    connect(fetch, SIGNAL(finished(int,QProcess::ExitStatus)), this, SLOT(fetchFinished(int,QProcess::ExitStatus)));
+    connect(fetch, SIGNAL(error(QProcess::ProcessError)), this, SLOT(fetchFailed(QProcess::ProcessError)));
+    QStringList arguments;
+    arguments << url.toString() << auth << tmp->fileName() << QString::fromLatin1(since);
+    fetch->start(QCoreApplication::applicationDirPath() + "/passviewer-fetch", arguments);
+#endif
 }
 
+#if QT_VERSION >= 0x050000
 void PassHandler::replyFinished(QNetworkReply *reply) {
     // check what this is an answer to
     QString path(m_replies.value(reply));
@@ -67,39 +96,79 @@ void PassHandler::replyFinished(QNetworkReply *reply) {
     }
     // load the reply into a temporary file
     QTemporaryFile tmp;
-    QString id;
-    if (tmp.open()) {
-        m_copyFile(tmp, *reply);
-        tmp.seek(0);
-        ZipFile zip(tmp.fileName());
-        if (!zip.isValid())
-            tmp.close();  // invalid reply
-        // get the ID for the pass DB
-        QJsonDocument json(QJsonDocument::fromJson(zip.getTextFile("pass.json").toUtf8()));
-        id = json.object().value("passTypeIdentifier").toString() + "/" + json.object().value("serialNumber").toString();
+    if (!tmp.open()) {
+        emit updateFinished("update failed");
+        return;
     }
-    if (tmp.isOpen()) {
-        // get changes to former version
-        QFile passFile(path);
-        QStringList changes;
-        if (passFile.exists())
-            changes = getChanges(path, tmp.fileName());
-        tmp.seek(0);
-        // overwrite former version
-        if (passFile.open(QFile::WriteOnly)) {
-            m_copyFile(passFile, tmp);
-            passFile.close();
-            // update pass DB
-            PassDB db;
-            PassInfo* info = new PassInfo(id, QDateTime::currentDateTime(), changes);
-            db.setPassInfo(info);
-            delete info;
-            emit updateFinished("ok");
-        }
-        else {
-            emit updateFinished("update failed");
-        }
-        tmp.close();
+    m_copyFile(tmp, *reply);
+    tmp.close();
+    m_installUpdate(path, tmp.fileName());
+}
+#else
+void PassHandler::fetchFinished(int exitCode, QProcess::ExitStatus exitStatus) {
+    QProcess* fetch = qobject_cast<QProcess*>(sender());
+    if (!fetch || !m_fetches.contains(fetch))
+        return;
+    Fetch job = m_fetches.take(fetch);
+    fetch->deleteLater();
+    QString state("update failed");
+    if (exitStatus == QProcess::NormalExit && exitCode == 0) {
+        // {"status": 200} / {"status": 304} / {"error": "..."}
+        QJsonDocument report(QJsonDocument::fromJson(fetch->readAllStandardOutput().trimmed()));
+        int status = report.object().value("status").toInt();
+        if (status == 304)
+            state = "no new version";
+        else if (status == 200)
+            state = "";
+        else
+            qWarning("passviewer-fetch: %s", qPrintable(report.object().value("error").toString()));
+    }
+    if (state.isEmpty())
+        m_installUpdate(job.path, job.file->fileName());
+    else
+        emit updateFinished(state);
+    delete job.file;
+}
+
+void PassHandler::fetchFailed(QProcess::ProcessError error) {
+    // The helper could not even be started (missing, not executable).
+    QProcess* fetch = qobject_cast<QProcess*>(sender());
+    if (!fetch || !m_fetches.contains(fetch) || error != QProcess::FailedToStart)
+        return;
+    Fetch job = m_fetches.take(fetch);
+    fetch->deleteLater();
+    delete job.file;
+    emit updateFinished("update failed");
+}
+#endif
+
+// The downloaded pass is in `downloaded`: check it, note what changed, and
+// put it in place of the old file. Shared by both ways of fetching.
+void PassHandler::m_installUpdate(const QString &path, const QString &downloaded) {
+    ZipFile zip(downloaded);
+    if (!zip.isValid()) {
+        emit updateFinished("update failed");
+        return;
+    }
+    // get the ID for the pass DB
+    QJsonDocument json(QJsonDocument::fromJson(zip.getTextFile("pass.json").toUtf8()));
+    QString id = json.object().value("passTypeIdentifier").toString() + "/" + json.object().value("serialNumber").toString();
+    // get changes to former version
+    QFile passFile(path);
+    QStringList changes;
+    if (passFile.exists())
+        changes = getChanges(path, downloaded);
+    // overwrite former version
+    QFile source(downloaded);
+    if (source.open(QFile::ReadOnly) && passFile.open(QFile::WriteOnly)) {
+        m_copyFile(passFile, source);
+        passFile.close();
+        // update pass DB
+        PassDB db;
+        PassInfo* info = new PassInfo(id, QDateTime::currentDateTime(), changes);
+        db.setPassInfo(info);
+        delete info;
+        emit updateFinished("ok");
     }
     else {
         emit updateFinished("update failed");
@@ -113,10 +182,12 @@ QMap<QString, QVariant> PassHandler::getFields(QString filename) {
     if (!zip.isValid())
         return fields;
     QJsonDocument pass(QJsonDocument::fromJson(zip.getTextFile("pass.json").toUtf8()));
-    QStringList styles({"boardingPass", "coupon", "eventTicket", "storeCard", "generic"});
-    QStringList types({"headerFields", "primaryFields", "secondaryFields", "auxiliaryFields"});
-    for (auto style = styles.cbegin(); style != styles.cend(); ++style) {
-        for (auto type = types.cbegin(); type != types.cend(); ++type) {
+    QStringList styles;
+    styles << "boardingPass" << "coupon" << "eventTicket" << "storeCard" << "generic";
+    QStringList types;
+    types << "headerFields" << "primaryFields" << "secondaryFields" << "auxiliaryFields";
+    for (auto style = styles.constBegin(); style != styles.constEnd(); ++style) {
+        for (auto type = types.constBegin(); type != types.constEnd(); ++type) {
             QJsonArray thisFields(pass.object().value(*style).toObject().value(*type).toArray());
             for (int entry = 0; entry < thisFields.size(); entry++) {
                 QJsonObject field(thisFields.at(entry).toObject());
@@ -133,7 +204,7 @@ QStringList PassHandler::getChanges(QString oldfile, QString newfile) {
     QStringList changed;
     QMap<QString, QVariant> oldfields(getFields(oldfile));
     QMap<QString, QVariant> newfields(getFields(newfile));
-    for (auto newfield = newfields.cbegin(); newfield != newfields.cend(); ++newfield) {
+    for (auto newfield = newfields.constBegin(); newfield != newfields.constEnd(); ++newfield) {
         if (!oldfields.contains(newfield.key()) || oldfields.value(newfield.key()) != newfield.value())
             changed.append(newfield.key());
     }
@@ -177,9 +248,14 @@ void PassHandler::m_copyFile(QIODevice &to, QIODevice &from) {
 
 QByteArray PassHandler::m_rfc2616(QDateTime datetime) {
     // RFC2616 is similar to RFC2822, but requires the weekday, requires UTC, and the timezone must be written as "GMT"
-    QString dateString(datetime.toUTC().toString(Qt::RFC2822Date));
-    QStringList weekdays({"NULL", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"});
-    dateString.prepend(weekdays.at(datetime.date().dayOfWeek()) + ", ");
-    dateString.replace("+0000", "GMT");
+    // "Sun, 06 Nov 1994 08:49:37 GMT"; spelt out so that the month names are
+    // English whatever the locale, on Qt 4 as on Qt 5.
+    QDateTime utc(datetime.toUTC());
+    QStringList weekdays;
+    weekdays << "NULL" << "Mon" << "Tue" << "Wed" << "Thu" << "Fri" << "Sat" << "Sun";
+    QStringList months;
+    months << "NULL" << "Jan" << "Feb" << "Mar" << "Apr" << "May" << "Jun" << "Jul" << "Aug" << "Sep" << "Oct" << "Nov" << "Dec";
+    QString dateString = weekdays.at(utc.date().dayOfWeek()) + ", "
+        + utc.toString("dd") + " " + months.at(utc.date().month()) + " " + utc.toString("yyyy HH:mm:ss") + " GMT";
     return dateString.toUtf8();
 }

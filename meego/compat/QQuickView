@@ -1,0 +1,5 @@
+// QDeclarativeView is a QGraphicsView, QQuickView a QWindow, but the app only
+// ever calls rootObject(), engine(), setSource() and show() on it.
+#pragma once
+#include <QDeclarativeView>
+typedef QDeclarativeView QQuickView;

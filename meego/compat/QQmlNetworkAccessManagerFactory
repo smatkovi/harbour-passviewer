@@ -1,0 +1,5 @@
+// Qt 4 shim: the factory that hands the QML engine its QNetworkAccessManager
+// is called QDeclarativeNetworkAccessManagerFactory here -- same two methods.
+#pragma once
+#include <QDeclarativeNetworkAccessManagerFactory>
+typedef QDeclarativeNetworkAccessManagerFactory QQmlNetworkAccessManagerFactory;

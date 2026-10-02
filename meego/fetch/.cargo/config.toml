@@ -1,0 +1,5 @@
+# Without these two lines cargo takes the machine's x86 linker and fails with
+# "relocations in generic ELF (EM: 40)". rust-lld comes with the toolchain.
+[target.armv7-unknown-linux-musleabi]
+linker = "rust-lld"
+rustflags = ["-C", "linker-flavor=ld.lld", "-C", "link-self-contained=yes"]

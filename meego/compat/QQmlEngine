@@ -1,0 +1,5 @@
+#pragma once
+#include <QDeclarativeEngine>
+#include <QDeclarativeContext>
+typedef QDeclarativeEngine QQmlEngine;
+typedef QDeclarativeContext QQmlContext;

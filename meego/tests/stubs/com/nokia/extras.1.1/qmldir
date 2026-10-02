@@ -1,0 +1,4 @@
+# Hand-written: the one component this port takes from com.nokia.extras.
+# The real one lives in the SDK under imports/com/nokia/extras.1.1 with a
+# plugin that cannot be loaded here.
+InfoBanner 1.1 InfoBanner.qml

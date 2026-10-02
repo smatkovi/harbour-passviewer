@@ -17,8 +17,9 @@ PassDB::PassDB(QObject *parent) :
     // create the tables, if they don't exist yet
     QSqlQuery checkTable(m_db);
     checkTable.prepare("select count(*) from sqlite_master where type='table' and name = :table");
-    QStringList tables({"passes", "changes"});
-    for (auto table = tables.cbegin(); table != tables.cend(); ++table) {
+    QStringList tables;
+    tables << "passes" << "changes";
+    for (auto table = tables.constBegin(); table != tables.constEnd(); ++table) {
         checkTable.bindValue(":table", *table);
         checkTable.exec();
         checkTable.next();
@@ -86,7 +87,7 @@ void PassDB::setPassInfo(PassInfo *info) {
         passQuery.exec();
         QSqlQuery changesQuery(m_db);
         changesQuery.prepare("insert into changes (pass_id, field) values (:id, :field)");
-        for (auto change = info->changes().cbegin(); change != info->changes().cend(); ++change) {
+        for (auto change = info->changes().constBegin(); change != info->changes().constEnd(); ++change) {
             changesQuery.bindValue(":id", info->id());
             changesQuery.bindValue(":field", *change);
             changesQuery.exec();

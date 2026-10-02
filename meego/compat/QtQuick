@@ -1,0 +1,11 @@
+// Qt 4 stand-in for the Qt 5 module header. QtDeclarative is the QML engine
+// of this Qt, and everything the shared sources pull out of <QtQuick> lives
+// there or in the shims next to this file.
+#pragma once
+#include <QtDeclarative>
+#include <QDeclarativeEngine>
+#include <QDeclarativeContext>
+#include <QDeclarativeItem>
+#include <QDeclarativeView>
+#include "QQuickView"
+#include "QQmlEngine"

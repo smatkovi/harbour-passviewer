@@ -7,7 +7,7 @@
 #include <QStringList>
 #include <QVariantList>
 #include <QVariantMap>
-#include <QRegularExpression>
+#include <QRegExp>
 #include <QJsonDocument>
 #include <QJsonArray>
 #include <QJsonObject>
@@ -16,7 +16,9 @@
 #include <QFileInfo>
 #include <QFileInfoList>
 #include <QDateTime>
+#if QT_VERSION >= 0x050000
 #include <QMimeDatabase>
+#endif
 #include <QLocale>
 #include <QStandardPaths>
 

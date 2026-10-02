@@ -29,6 +29,48 @@ DateTimeFormat::DateTimeFormat(QObject *parent) :
     m_timeFormats.insert("full", m_timeFormats.value("long"));
 }
 
+// Qt 5 reads a zone offset in Qt::ISODate; Qt 4.7 silently drops it, so the
+// offset is applied by hand there. Both paths yield local time.
+QDateTime DateTimeFormat::m_fromIso(QString text) {
+#if QT_VERSION >= 0x050000
+    return QDateTime::fromString(text, Qt::ISODate);
+#else
+    QString core(text.trimmed());
+    int offsetMinutes = 0;
+    bool zoned = false;
+    if (core.endsWith('Z')) {
+        core.chop(1);
+        zoned = true;
+    }
+    else {
+        int tpos = core.indexOf('T');
+        int zpos = -1;
+        if (tpos >= 0) {
+            int plus = core.indexOf('+', tpos);
+            int minus = core.indexOf('-', tpos);
+            zpos = plus >= 0 ? plus : minus;
+        }
+        if (zpos >= 0) {
+            QString zone(core.mid(zpos + 1).remove(':'));
+            if (zone.size() == 4) {
+                offsetMinutes = zone.left(2).toInt() * 60 + zone.mid(2, 2).toInt();
+                if (core.at(zpos) == '-')
+                    offsetMinutes = -offsetMinutes;
+                zoned = true;
+            }
+            core = core.left(zpos);
+        }
+    }
+    QDateTime parsed(QDateTime::fromString(core, Qt::ISODate));
+    if (!parsed.isValid())
+        return parsed;
+    if (!zoned)
+        return parsed;  // no zone given: local time
+    parsed.setTimeSpec(Qt::UTC);
+    return parsed.addSecs(-offsetMinutes * 60).toLocalTime();
+#endif
+}
+
 QString DateTimeFormat::m_expandCodes(QString orig) {
     // expand composite codes to the specific codes
     return orig.replace("%D", "%m/%d/%y").replace("%F", "%Y-%m-%d").replace("%h", "%b").replace("%r", "%I:%M:%S %p").replace("%R", "%H:%M").replace("%T", "%H:%M:%S");
@@ -79,7 +121,7 @@ QString DateTimeFormat::format(QString dateTime, QString dateFormat, QString tim
         }
     }
     // get the datetime
-    QDateTime dtObj(QDateTime::fromString(dateTime, Qt::ISODate));
+    QDateTime dtObj(m_fromIso(dateTime));
     if (!dtObj.isValid())
         return dateTime;  // fallback
     // create the complete format string

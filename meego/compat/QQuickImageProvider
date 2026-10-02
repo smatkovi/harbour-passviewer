@@ -1,0 +1,5 @@
+// Qt 4 shim: QDeclarativeImageProvider has the same requestPixmap() the two
+// providers of this app implement, and the same ImageType::Pixmap.
+#pragma once
+#include <QDeclarativeImageProvider>
+typedef QDeclarativeImageProvider QQuickImageProvider;

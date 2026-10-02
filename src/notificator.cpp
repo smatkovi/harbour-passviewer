@@ -8,7 +8,7 @@ Notificator::Notificator(QObject *parent) :
 }
 
 Notificator::~Notificator() {
-    for (auto notification = m_notifications.cbegin(); notification != m_notifications.cend(); ++notification)
+    for (auto notification = m_notifications.constBegin(); notification != m_notifications.constEnd(); ++notification)
         (*notification)->close();
     qDeleteAll(m_notifications);
 }

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Encoding=UTF-8
+Version=1.0
+Type=Application
+Name=Pass Viewer
+Comment=Viewer for Passbook files
+Icon=/usr/share/icons/hicolor/80x80/apps/harbour-passviewer.png
+Exec=/opt/harbour-passviewer/bin/harbour-passviewer %f
+Terminal=false
+Categories=Office;
+MimeType=application/vnd.apple.pkpass
+X-Osso-Type=application/x-executable

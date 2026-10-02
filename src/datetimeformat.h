@@ -25,6 +25,7 @@ private:
     QMap<QString, QString> m_dateFormats;
     QMap<QString, QString> m_timeFormats;
 
+    QDateTime m_fromIso(QString text);
     QString m_expandCodes(QString orig);
     QString m_clearCodes(QString orig, QString allowed);
 };

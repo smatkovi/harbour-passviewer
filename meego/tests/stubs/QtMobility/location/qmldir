@@ -1,0 +1,3 @@
+# Stand-ins for the checker: QtMobility.location 1.2 as the device has it.
+PositionSource 1.2 PositionSource.qml
+Coordinate 1.2 Coordinate.qml
