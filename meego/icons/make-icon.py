@@ -71,11 +71,13 @@ SEAM_REACH = 6              # half a dash period, for closing the gaps when meas
 SEAM_SMOOTH = 8             # and for letting the measurement fade instead of step
 LEATHER_MAX = 140           # brighter than this, or
 LEATHER_SAT = 25            # more coloured than this, is the boarding pass, not the wallet
-LOOSE_FALL = 6              # a stitch is at least this much darker than around it
-LOOSE_AREA = 60             # and is a short dash: no more pixels than this,
-LOOSE_SIZE = 12             # and no longer than this in either direction
+LOOSE_FALL = 6              # a stitch is at least this much darker than both its sides
+LOOSE_SPAN = (2, 4)         # which are looked for this far off, clear of its own width
+LOOSE_AREA = 80             # and is a short dash: no more pixels than this,
+LOOSE_SIZE = 18             # and no longer than this in either direction
 CROWD = 18                  # this close to the outline it may be a second outline,
-ACROSS = 0.5                # unless it runs across it instead of along it
+ACROSS = 0.85               # unless it runs across it instead of along it,
+SLIM = 1.7                  # and is drawn out enough for that to mean anything
 LOOSE_BLEED = 2             # swept this much wider, so no soft edge of it stays behind
 FILL_STEPS = 48             # how far the leather may be drawn out to meet the silhouette
 RAYS = 4096                 # how finely the silhouette's outline is walked
@@ -130,6 +132,28 @@ def _grow_into(rgb, have, want, steps):
     return rgb
 
 
+def _ridges(lit):
+    """How much darker each pixel is than the ground on both sides of it.
+
+    A stitch is a thin dark line, so whichever way one crosses it, it is darker
+    than what lies either side. An edge in the artwork is not: the shadow along
+    the back of the wallet is darker than the leather on one side only, and
+    measuring against the brighter side alone reports its whole length as a
+    stitch -- which then hangs together with every dash it touches into one
+    shape too big to be taken for stitching at all.
+    """
+    near, far = LOOSE_SPAN
+    best = np.zeros(lit.shape)
+    for dy, dx in ((0, 1), (1, 0), (1, 1), (1, -1)):
+        side = []
+        for way in (1, -1):
+            reach = [np.roll(np.roll(lit, way * k * dy, 0), way * k * dx, 1)
+                     for k in range(near, far + 1)]
+            side.append(np.maximum.reduce(reach))
+        best = np.maximum(best, np.minimum(side[0], side[1]) - lit)
+    return best
+
+
 def _blobs(flag):
     """The connected runs of a flag, as lists of their pixels."""
     seen = np.zeros(flag.shape, bool)
@@ -168,24 +192,28 @@ def erase_loose_stitches(art, alpha):
     the left edge like that, and it has to keep running out to meet the seam
     coming down. A dash is long enough to say which way it points, and the
     direction to the nearest point of the outline says what to hold it against:
-    measured here, the back's stitches come out at 0.05 to 0.20 of running
-    along, the pocket's at 0.95 to 1.00 of running across.
+    measured here, the back's stitches come out at 0.06 to 0.72 of running
+    along, the pocket's at 0.95 to 1.00 of running across. A dash too stubby to
+    point anywhere is not asked, it simply goes.
 
     A stitch is told from the outlines it runs beside by being short: those are
     long unbroken curves, a dash is a dozen pixels. And it is swept a little
     wider than it is found, or its soft edge stays behind as a ghost of the line.
     """
     rgb = np.asarray(art.convert("RGB"), dtype=float)
-    lit = Image.fromarray(np.clip(_luma(rgb), 0, 255).astype(np.uint8))
-    ground = np.asarray(lit.filter(ImageFilter.MaxFilter(5)), dtype=float)
-    around = np.dstack([np.asarray(Image.fromarray(np.clip(rgb[:, :, c], 0, 255)
-                                                  .astype(np.uint8))
-                                   .filter(ImageFilter.MaxFilter(5)), dtype=float)
-                        for c in range(3)])
-    leather = ((rgb.max(2) - rgb.min(2) <= LEATHER_SAT)
-               & (around.max(2) - around.min(2) <= LEATHER_SAT)
+    ridge = _ridges(_luma(rgb))
+    # What a stitch lies against is its own level plus how far it is sunk below
+    # it -- not the brightest pixel anywhere near, which beside the boarding
+    # pass is the pass itself and would rule the stitch out as lying on paper.
+    ground = _luma(rgb) + ridge
+    # Nothing of this applies where the artwork is not there: a transparent
+    # pixel carries black, which is grey and dark and would pass for leather,
+    # and filling from it paints a black notch into the icon.
+    solid = np.asarray(art.split()[3], dtype=float) >= 250
+    leather = (solid
+               & (rgb.max(2) - rgb.min(2) <= LEATHER_SAT)
                & (ground <= LEATHER_MAX))
-    loose = (ground - _luma(rgb) >= LOOSE_FALL) & leather
+    loose = (ridge >= LOOSE_FALL) & leather
     inside = np.asarray(alpha.resize((ART, ART), Image.LANCZOS), dtype=float) > 128
     rim = (inside ^ np.roll(inside, 1, 0)) | (inside ^ np.roll(inside, 1, 1))
     ry, rx = np.nonzero(rim)
@@ -205,8 +233,9 @@ def erase_loose_stitches(art, alpha):
         if len(blob) >= 4:
             out = np.argmin(reach)
             way = np.array([ry[out] - cy, rx[out] - cx]) / max(near, 1e-6)
-            run = np.linalg.eigh(np.cov(np.stack([ys - cy, xs - cx])))[1][:, -1]
-            if abs(float(run @ way)) > ACROSS:
+            spread, axis = np.linalg.eigh(np.cov(np.stack([ys - cy, xs - cx])))
+            drawn = np.sqrt(max(spread[-1], 1e-9) / max(spread[0], 1e-9))
+            if drawn >= SLIM and abs(float(axis[:, -1] @ way)) > ACROSS:
                 continue                               # it crosses the outline, not along
         for a, b in blob:
             want[a, b] = True
@@ -216,7 +245,12 @@ def erase_loose_stitches(art, alpha):
             for dx in (-1, 0, 1):
                 wider |= np.roll(np.roll(want, dy, 0), dx, 1)
         want = wider & leather
-    rgb = _grow_into(rgb, ~want, want, 8)
+    # Closed from leather only: beside the boarding pass, the nearest pixels
+    # are the pass, and drawing them in would smear it across the wallet.
+    backdrop = (solid
+                & (rgb.max(2) - rgb.min(2) <= LEATHER_SAT)
+                & (_luma(rgb) <= LEATHER_MAX))
+    rgb = _grow_into(rgb, backdrop & ~want, want, 8)
     out = Image.fromarray(np.clip(rgb, 0, 255).astype(np.uint8)).convert("RGBA")
     out.putalpha(art.split()[3])
     return out
