@@ -4,4 +4,4 @@
 # revision.
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 UP=$(sed -n 's/^Version: *//p' "$HERE/rpm/harbour-passviewer.yaml" | head -1)
-echo "${UP:-1.7}-meego7"
+echo "${UP:-1.7}-meego8"

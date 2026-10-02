@@ -74,7 +74,8 @@ LEATHER_SAT = 25            # more coloured than this, is the boarding pass, not
 LOOSE_FALL = 6              # a stitch is at least this much darker than around it
 LOOSE_AREA = 60             # and is a short dash: no more pixels than this,
 LOOSE_SIZE = 12             # and no longer than this in either direction
-MOUTH = (74, 88, 0, 101)    # top, bottom, left, right of the pocket's mouth, measured here
+CROWD = 18                  # this close to the outline it is a second outline, and goes
+LOOSE_BLEED = 2             # swept this much wider, so no soft edge of it stays behind
 FILL_STEPS = 48             # how far the leather may be drawn out to meet the silhouette
 RAYS = 4096                 # how finely the silhouette's outline is walked
 TANGENT = 16                # rays apart, for reading the direction of that outline
@@ -149,20 +150,22 @@ def _blobs(flag):
     return out
 
 
-def erase_loose_stitches(art):
-    """Takes out the stitching that is not the seam along the outline.
+def erase_loose_stitches(art, alpha):
+    """Takes out the stitching that runs beside the seam along the outline.
 
-    The wallet carries more than one seam. The pocket is stitched along its own
-    rounded flank, and the back is stitched around its own rounded corner, and
-    both of those run near the right edge of the icon -- close enough to the new
-    seam to read as a second one beside it, and curving harder, because they
-    follow their own smaller shapes. On the Sailfish square they sit far apart;
-    under the squircle they crowd.
+    The wallet carries more than one seam. The back is stitched around its own
+    rounded corner, which on the Sailfish square sits in the corner and under
+    the squircle runs down the right flank, a few pixels beside the new seam
+    and curving harder, because it follows a smaller shape. The pocket is
+    stitched along its own flank too, but that one lies deep inside the icon
+    and reads as what it is -- the pocket's line, not a second outline.
 
-    So every stitch is taken out but the one row along the mouth of the pocket,
-    which lies well inside the icon and is the pocket's own line, not a second
-    outline. A stitch is told from everything else by being short: the outlines
-    it runs beside are long unbroken curves, and a dash is a dozen pixels.
+    So the distance to the outline decides: a stitch close to it is a second
+    outline and goes, one well inside stays. Measured here, the back's stitches
+    sit 9 to 16 pixels from the silhouette and the pocket's 20 to 77. A stitch
+    is told from the outlines it runs beside by being short: those are long
+    unbroken curves, a dash is a dozen pixels. It is swept a little wider than
+    it is found, or its soft edge stays behind as a ghost of the line.
     """
     rgb = np.asarray(art.convert("RGB"), dtype=float)
     lit = Image.fromarray(np.clip(_luma(rgb), 0, 255).astype(np.uint8))
@@ -171,11 +174,13 @@ def erase_loose_stitches(art):
                                                   .astype(np.uint8))
                                    .filter(ImageFilter.MaxFilter(5)), dtype=float)
                         for c in range(3)])
-    loose = ((ground - _luma(rgb) >= LOOSE_FALL)
-             & (rgb.max(2) - rgb.min(2) <= LEATHER_SAT)
-             & (around.max(2) - around.min(2) <= LEATHER_SAT)
-             & (ground <= LEATHER_MAX))
-    top, bottom, left, right = MOUTH
+    leather = ((rgb.max(2) - rgb.min(2) <= LEATHER_SAT)
+               & (around.max(2) - around.min(2) <= LEATHER_SAT)
+               & (ground <= LEATHER_MAX))
+    loose = (ground - _luma(rgb) >= LOOSE_FALL) & leather
+    inside = np.asarray(alpha.resize((ART, ART), Image.LANCZOS), dtype=float) > 128
+    rim = (inside ^ np.roll(inside, 1, 0)) | (inside ^ np.roll(inside, 1, 1))
+    ry, rx = np.nonzero(rim)
     want = np.zeros(loose.shape, bool)
     for blob in _blobs(loose):
         ys = [a for a, b in blob]
@@ -184,10 +189,17 @@ def erase_loose_stitches(art):
             continue
         if max(max(ys) - min(ys), max(xs) - min(xs)) > LOOSE_SIZE:
             continue
-        if top <= min(ys) and max(ys) <= bottom and left <= min(xs) and max(xs) <= right:
-            continue                                   # the mouth of the pocket stays
+        near = np.sqrt(((ry - np.mean(ys)) ** 2 + (rx - np.mean(xs)) ** 2).min())
+        if near > CROWD:
+            continue                                   # the wallet's own inner line
         for a, b in blob:
             want[a, b] = True
+    for _ in range(LOOSE_BLEED):
+        wider = want.copy()
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                wider |= np.roll(np.roll(want, dy, 0), dx, 1)
+        want = wider & leather
     rgb = _grow_into(rgb, ~want, want, 8)
     out = Image.fromarray(np.clip(rgb, 0, 255).astype(np.uint8)).convert("RGBA")
     out.putalpha(art.split()[3])
@@ -364,11 +376,11 @@ def build():
     # The stitches are lifted where they are sharp, in the artwork's own pixels;
     # everything after that happens at 4x.
     art, share = lift_seam(Image.open(ART_SOURCE).convert("RGBA"))
-    art = erase_loose_stitches(art)
+    mask = squircle()
+    art = erase_loose_stitches(art, mask)
     art = art.resize((S, S), Image.LANCZOS)
     icon = Image.new("RGBA", (S, S), (0, 0, 0, 0))
     icon.paste(art, (0, 0))
-    mask = squircle()
     icon = fill_to_silhouette(icon, mask)
     icon.putalpha(mask)
     icon = lay_seam(icon, mask, share)
