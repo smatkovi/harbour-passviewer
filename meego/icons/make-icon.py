@@ -30,12 +30,18 @@ The second is the stitching: the wallet's seam runs along the top
 and left edge at a constant inset, so it follows the outline it was drawn for
 -- the Sailfish square. Cut to the squircle it keeps running straight into the
 rounded corner and is chopped off there. The seam is therefore lifted off the
-artwork and laid down again along the squircle: the old stitches are measured
-(where they are, how dark they are against what they lie on), painted out, and
-redrawn on a path that is the silhouette itself, moved inward by the inset they
-had. Their darkness is carried over from the measurement, so the seam keeps
-fading out where the artwork turns into shadow and keeps its gap where the
-boarding pass covers the edge -- the stitching is never invented, only moved.
+artwork and laid down again along the squircle: the old stitches are measured,
+painted out, and redrawn on a path that is the silhouette itself, moved inward
+by the inset they had.
+
+The new seam runs the whole way round, which the drawn one never did -- it
+stopped where the wallet turns into shadow, because on the Sailfish square that
+shadowed side is a corner one hardly looks at, and here it is a full flank of
+the icon. What the measurement hands over for that is not a darkness but a
+fraction: a stitch is about four tenths darker than whatever it lies on, lit
+back or shadowed edge alike. The one place it stays away from is the boarding
+pass -- where the pass covers the edge of the wallet, the stitching is behind
+it, and the gap the artwork shows there is kept.
 
     python3 meego/icons/make-icon.py      # writes icon-80.png and icon-64.png
 """
@@ -63,6 +69,8 @@ SEAM_FAINT = 2              # but once a run is found, this much is swept away w
 SEAM_EVEN_GROUND = 20       # and the ground to both sides of it must agree this closely
 SEAM_REACH = 6              # half a dash period, for closing the gaps when measuring
 SEAM_SMOOTH = 8             # and for letting the measurement fade instead of step
+LEATHER_MAX = 140           # brighter than this, or
+LEATHER_SAT = 25            # more coloured than this, is the boarding pass, not the wallet
 FILL_STEPS = 48             # how far the leather may be drawn out to meet the silhouette
 RAYS = 4096                 # how finely the silhouette's outline is walked
 TANGENT = 16                # rays apart, for reading the direction of that outline
@@ -136,9 +144,11 @@ def lift_seam(art):
     ground wherever the first one found a run at all -- otherwise the old
     straight line stays standing next to the new curved one, faint but visible.
 
-    The measured drops are returned per column and per row, closed over the gaps
-    between the stitches and smoothed, which is what later makes the new seam
-    fade where the old one faded.
+    What is returned is how dark a stitch is against what it lies on, as a
+    fraction: the drops and their grounds vary all over the artwork, but their
+    ratio hardly does, and a fraction is the one reading that can be carried
+    anywhere -- including the shadowed side, where the wallet was never drawn
+    with a seam at all.
     """
     rgb = np.asarray(art.convert("RGB"), dtype=float)
     lo, hi = SEAM_BAND
@@ -155,12 +165,19 @@ def lift_seam(art):
         grey = (here.max(2) - here.min(2) <= 12) & (ground.max(2) - ground.min(2) <= 12)
         even = abs(_luma(band[near]) - _luma(band[far])) <= SEAM_EVEN_GROUND
         stitch = (fall >= SEAM_MIN_DELTA) & grey & even
-        drop[edge] = _envelope(np.where(stitch, fall, 0.0).max(0))   # deepest drop per column
-        swept = grey & even & (fall >= SEAM_FAINT) & (drop[edge] > SEAM_FAINT)
+        run = _envelope(np.where(stitch, fall, 0.0).max(0))          # deepest drop per column
+        swept = grey & even & (fall >= SEAM_FAINT) & (run > SEAM_FAINT)
         band[lo:hi + 1] = np.where(swept[..., None], ground, here)
+        # The deepest point of each stitch, against the ground right there: the
+        # soft edges of a stitch are shallower and would talk the fraction down.
+        deep = np.where(stitch, fall, 0.0).argmax(0)
+        col = np.arange(fall.shape[1])
+        drop[edge] = (fall[deep, col], _luma(ground)[deep, col], stitch.any(0))
     out = Image.fromarray(np.clip(rgb, 0, 255).astype(np.uint8))
     out.putalpha(art.split()[3])
-    return out, drop
+    fall = np.concatenate([d[0][d[2]] for d in drop.values()])
+    ground = np.concatenate([d[1][d[2]] for d in drop.values()])
+    return out, float(np.median(fall / np.maximum(ground, 1.0)))
 
 
 def _envelope(drop):
@@ -170,25 +187,6 @@ def _envelope(drop):
     pad = np.pad(closed, SEAM_SMOOTH, mode="edge")
     window = 2 * SEAM_SMOOTH + 1
     return np.convolve(pad, np.ones(window) / window, mode="valid")
-
-
-def carried_span(alpha):
-    """How much of the old seam lay on material the cut keeps.
-
-    The left seam fades out towards the bottom because the pocket turns into
-    shadow there -- and that shadow is precisely what the squircle cuts away.
-    Read literally, the fade would dim the new seam just as it rounds the bend,
-    which is where it is most plainly supposed to follow the outline. So the
-    measurement is only trusted as far as the silhouette still carries the place
-    it was taken; beyond that the last reading on kept material stands.
-
-    The top seam needs no such help, and gets none: it fades well inside the
-    silhouette, into the shadow of the wallet itself, and that shadow stays.
-    """
-    m = np.asarray(alpha.resize((ART, ART), Image.LANCZOS), dtype=float)
-    i = int(round(SEAM_INSET))
-    kept = {"top": np.nonzero(m[i] > 128)[0], "left": np.nonzero(m[:, i] > 128)[0]}
-    return {e: (int(v[0]), int(v[-1])) for e, v in kept.items()}
 
 
 def seam_path(alpha, inset):
@@ -233,23 +231,28 @@ def _sample(a, x, y):
             + (a[y0 + 1, x0] * (1 - fx) + a[y0 + 1, x0 + 1] * fx) * fy)
 
 
-def stitch_depth(x, y, nx, ny, drop, span):
-    """How dark a stitch at this point was, where the old seam ran."""
-    ax, ay = x * ART / float(S), y * ART / float(S)
-    wx, wy = abs(nx) / (abs(nx) + abs(ny)), abs(ny) / (abs(nx) + abs(ny))
-    def look(edge, at):
-        lo, hi = span[edge]
-        return drop[edge][int(round(min(max(at, lo), hi)))]
-    # The normal points inward, so the top edge is the one whose normal points down.
-    down = wy * look("top", ax) if ny > 0 else 0.0
-    right = wx * look("left", ay) if nx > 0 else 0.0
-    return down + right
+def stitch_shade(rgb, points, share):
+    """How dark a stitch is here, and whether one belongs here at all.
+
+    A stitch is drawn as a fraction of the ground it lies on, so it keeps the
+    same weight on the lit back of the wallet and on the shadowed rolled edge,
+    where nothing was ever drawn. What it must not be drawn on is the boarding
+    pass: where the pass covers the edge of the wallet, the stitching is behind
+    it, and the artwork shows that gap. Leather is grey and mid-dark, the pass
+    is white or red, which is all the telling apart that is needed.
+    """
+    patch = np.array([rgb[int(round(y)), int(round(x))] for x, y in points])
+    ground = float(np.mean(_luma(patch)))
+    colour = float(np.mean(patch.max(1) - patch.min(1)))
+    if ground > LEATHER_MAX or colour > LEATHER_SAT:
+        return 0.0
+    return share * ground
 
 
-def lay_seam(art, alpha, drop):
-    """Draws the lifted seam again, along the silhouette."""
+def lay_seam(art, alpha, share):
+    """Draws the lifted seam again, along the silhouette -- all the way round."""
+    rgb = np.asarray(art.convert("RGB"), dtype=float)
     scale = S / float(ART)
-    span = carried_span(alpha)
     sx, sy, nx, ny = seam_path(alpha, SEAM_INSET * scale)
     # Begin at the top left corner and centre a stitch on it, so the corner
     # carries its stitch around the bend the way the drawn one does.
@@ -269,14 +272,13 @@ def lay_seam(art, alpha, drop):
             run.append(i)
             continue
         if len(run) > 1:
-            depth = np.mean([stitch_depth(sx[j], sy[j], nx[j], ny[j], drop, span)
-                             for j in run])
+            depth = stitch_shade(rgb, [(sx[j], sy[j]) for j in run], share)
             if depth >= 1.0:
                 pen.line([(sx[j] * over, sy[j] * over) for j in run],
                          fill=int(round(depth)), width=width, joint="curve")
         run = []
     shade = np.asarray(shade.resize((S, S), Image.BOX), dtype=float)
-    rgb = np.asarray(art.convert("RGB"), dtype=float) - shade[..., None]
+    rgb = rgb - shade[..., None]
     out = Image.fromarray(np.clip(rgb, 0, 255).astype(np.uint8))
     out.putalpha(art.split()[3])
     return out
@@ -285,14 +287,14 @@ def lay_seam(art, alpha, drop):
 def build():
     # The stitches are lifted where they are sharp, in the artwork's own pixels;
     # everything after that happens at 4x.
-    art, drop = lift_seam(Image.open(ART_SOURCE).convert("RGBA"))
+    art, share = lift_seam(Image.open(ART_SOURCE).convert("RGBA"))
     art = art.resize((S, S), Image.LANCZOS)
     icon = Image.new("RGBA", (S, S), (0, 0, 0, 0))
     icon.paste(art, (0, 0))
     mask = squircle()
     icon = fill_to_silhouette(icon, mask)
     icon.putalpha(mask)
-    icon = lay_seam(icon, mask, drop)
+    icon = lay_seam(icon, mask, share)
     for size in SIZES:
         icon.resize((size, size), Image.LANCZOS).save("%s/icon-%d.png" % (HERE, size))
         print("icon-%d.png" % size)
