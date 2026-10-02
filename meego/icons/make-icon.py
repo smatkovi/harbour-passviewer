@@ -74,7 +74,8 @@ LEATHER_SAT = 25            # more coloured than this, is the boarding pass, not
 LOOSE_FALL = 6              # a stitch is at least this much darker than around it
 LOOSE_AREA = 60             # and is a short dash: no more pixels than this,
 LOOSE_SIZE = 12             # and no longer than this in either direction
-CROWD = 18                  # this close to the outline it is a second outline, and goes
+CROWD = 18                  # this close to the outline it may be a second outline,
+ACROSS = 0.5                # unless it runs across it instead of along it
 LOOSE_BLEED = 2             # swept this much wider, so no soft edge of it stays behind
 FILL_STEPS = 48             # how far the leather may be drawn out to meet the silhouette
 RAYS = 4096                 # how finely the silhouette's outline is walked
@@ -160,12 +161,19 @@ def erase_loose_stitches(art, alpha):
     stitched along its own flank too, but that one lies deep inside the icon
     and reads as what it is -- the pocket's line, not a second outline.
 
-    So the distance to the outline decides: a stitch close to it is a second
-    outline and goes, one well inside stays. Measured here, the back's stitches
-    sit 9 to 16 pixels from the silhouette and the pocket's 20 to 77. A stitch
-    is told from the outlines it runs beside by being short: those are long
-    unbroken curves, a dash is a dozen pixels. It is swept a little wider than
-    it is found, or its soft edge stays behind as a ghost of the line.
+    So two things decide, and a stitch has to fail both to go: how close to the
+    outline it lies, and which way it runs there. Close and alongside is a
+    second outline. Close but across it is some other line of the wallet
+    arriving at the edge -- the seam along the mouth of the pocket runs out to
+    the left edge like that, and it has to keep running out to meet the seam
+    coming down. A dash is long enough to say which way it points, and the
+    direction to the nearest point of the outline says what to hold it against:
+    measured here, the back's stitches come out at 0.05 to 0.20 of running
+    along, the pocket's at 0.95 to 1.00 of running across.
+
+    A stitch is told from the outlines it runs beside by being short: those are
+    long unbroken curves, a dash is a dozen pixels. And it is swept a little
+    wider than it is found, or its soft edge stays behind as a ghost of the line.
     """
     rgb = np.asarray(art.convert("RGB"), dtype=float)
     lit = Image.fromarray(np.clip(_luma(rgb), 0, 255).astype(np.uint8))
@@ -183,15 +191,23 @@ def erase_loose_stitches(art, alpha):
     ry, rx = np.nonzero(rim)
     want = np.zeros(loose.shape, bool)
     for blob in _blobs(loose):
-        ys = [a for a, b in blob]
-        xs = [b for a, b in blob]
+        ys = np.array([a for a, b in blob], dtype=float)
+        xs = np.array([b for a, b in blob], dtype=float)
         if len(blob) > LOOSE_AREA:
             continue
-        if max(max(ys) - min(ys), max(xs) - min(xs)) > LOOSE_SIZE:
+        if max(ys.max() - ys.min(), xs.max() - xs.min()) > LOOSE_SIZE:
             continue
-        near = np.sqrt(((ry - np.mean(ys)) ** 2 + (rx - np.mean(xs)) ** 2).min())
+        cy, cx = np.mean(ys), np.mean(xs)
+        reach = np.hypot(ry - cy, rx - cx)
+        near = reach.min()
         if near > CROWD:
             continue                                   # the wallet's own inner line
+        if len(blob) >= 4:
+            out = np.argmin(reach)
+            way = np.array([ry[out] - cy, rx[out] - cx]) / max(near, 1e-6)
+            run = np.linalg.eigh(np.cov(np.stack([ys - cy, xs - cx])))[1][:, -1]
+            if abs(float(run @ way)) > ACROSS:
+                continue                               # it crosses the outline, not along
         for a, b in blob:
             want[a, b] = True
     for _ in range(LOOSE_BLEED):
