@@ -16,7 +16,17 @@ scaled down at the end; the curve aliases badly if it is drawn at 80 px. Only
 the seam below is read and painted out in the artwork's own 172 px, where its
 stitches are still sharp.
 
-Cutting alone is not enough, though: the wallet's stitching runs along the top
+Cutting alone is not enough, though. Two things of the artwork still belong to
+the square it was drawn in.
+
+The first is the material. The wallet is seen at an angle and its own rounded
+edge leaves the top right corner of the image empty; the squircle reaches
+further out there than the wallet does, and stamping the silhouette on as the
+alpha channel would turn that empty corner into a black crescent -- the shape
+cut out, but nothing filling it. The leather is therefore grown outward into
+whatever the silhouette covers and the artwork does not.
+
+The second is the stitching: the wallet's seam runs along the top
 and left edge at a constant inset, so it follows the outline it was drawn for
 -- the Sailfish square. Cut to the squircle it keeps running straight into the
 rounded corner and is chopped off there. The seam is therefore lifted off the
@@ -49,9 +59,11 @@ SEAM_FLANKS = (4, 12)       # untouched rows/columns just outside them
 SEAM_WIDTH = 2.6            # stitch thickness
 DASH, GAP = 6.0, 4.0        # stitch, then gap
 SEAM_MIN_DELTA = 10         # darker than its ground by this much, or it is not a stitch
+SEAM_FAINT = 2              # but once a run is found, this much is swept away with it
 SEAM_EVEN_GROUND = 20       # and the ground to both sides of it must agree this closely
 SEAM_REACH = 6              # half a dash period, for closing the gaps when measuring
 SEAM_SMOOTH = 8             # and for letting the measurement fade instead of step
+FILL_STEPS = 48             # how far the leather may be drawn out to meet the silhouette
 RAYS = 4096                 # how finely the silhouette's outline is walked
 TANGENT = 16                # rays apart, for reading the direction of that outline
 
@@ -60,6 +72,42 @@ def squircle():
     """MeeGo's icon silhouette, straight out of a stock icon's alpha."""
     stock = Image.open(MASK_SOURCE).convert("RGBA")
     return stock.split()[3].resize((S, S), Image.LANCZOS)
+
+
+def fill_to_silhouette(art, alpha):
+    """Draws the leather out to wherever the silhouette reaches.
+
+    The Sailfish icon is not a filled square: the wallet is seen at an angle
+    and its own rounded edge leaves the top right corner of the image empty.
+    The squircle reaches further out there than the wallet does, and simply
+    stamping the silhouette on as the alpha channel turns that empty corner
+    into a black crescent -- the cut-out shape shows, but no material fills it.
+
+    So the material is grown outward instead: every pixel the silhouette covers
+    but the artwork does not takes the mean of its covered neighbours, one ring
+    at a time, until the corner is closed. What grows out is the dark rolled
+    edge that borders the gap, which is exactly the material that belongs there.
+    """
+    rgb = np.asarray(art.convert("RGB"), dtype=float)
+    have = np.asarray(art.split()[3], dtype=float) >= 250
+    want = (np.asarray(alpha, dtype=float) > 0) & ~have
+    for _ in range(FILL_STEPS):
+        if not want.any():
+            break
+        total = np.zeros_like(rgb)
+        count = np.zeros(rgb.shape[:2])
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                if dy == dx == 0:
+                    continue
+                total += np.roll(np.roll(rgb * have[..., None], dy, 0), dx, 1)
+                count += np.roll(np.roll(have.astype(float), dy, 0), dx, 1)
+        ring = want & (count > 0)
+        rgb = np.where(ring[..., None], total / np.maximum(count, 1)[..., None], rgb)
+        have, want = have | ring, want & ~ring
+    out = Image.fromarray(np.clip(rgb, 0, 255).astype(np.uint8)).convert("RGBA")
+    out.putalpha(art.split()[3])
+    return out
 
 
 def _luma(rgb):
@@ -82,6 +130,12 @@ def lift_seam(art):
     steeply across the band, which on its own reads exactly like a very broad
     stitch. It also keeps the gap where the boarding pass lies over the edge.
 
+    That strict test finds where the seam runs, but not all of it: where the
+    stitching fades towards the shadow it drops below the threshold, and its
+    soft edges always do. A second sweep therefore takes the band down to its
+    ground wherever the first one found a run at all -- otherwise the old
+    straight line stays standing next to the new curved one, faint but visible.
+
     The measured drops are returned per column and per row, closed over the gaps
     between the stitches and smoothed, which is what later makes the new seam
     fade where the old one faded.
@@ -101,11 +155,12 @@ def lift_seam(art):
         grey = (here.max(2) - here.min(2) <= 12) & (ground.max(2) - ground.min(2) <= 12)
         even = abs(_luma(band[near]) - _luma(band[far])) <= SEAM_EVEN_GROUND
         stitch = (fall >= SEAM_MIN_DELTA) & grey & even
-        band[lo:hi + 1] = np.where(stitch[..., None], ground, here)
-        drop[edge] = np.where(stitch, fall, 0.0).max(0)       # deepest drop per column
+        drop[edge] = _envelope(np.where(stitch, fall, 0.0).max(0))   # deepest drop per column
+        swept = grey & even & (fall >= SEAM_FAINT) & (drop[edge] > SEAM_FAINT)
+        band[lo:hi + 1] = np.where(swept[..., None], ground, here)
     out = Image.fromarray(np.clip(rgb, 0, 255).astype(np.uint8))
     out.putalpha(art.split()[3])
-    return out, {e: _envelope(d) for e, d in drop.items()}
+    return out, drop
 
 
 def _envelope(drop):
@@ -115,6 +170,25 @@ def _envelope(drop):
     pad = np.pad(closed, SEAM_SMOOTH, mode="edge")
     window = 2 * SEAM_SMOOTH + 1
     return np.convolve(pad, np.ones(window) / window, mode="valid")
+
+
+def carried_span(alpha):
+    """How much of the old seam lay on material the cut keeps.
+
+    The left seam fades out towards the bottom because the pocket turns into
+    shadow there -- and that shadow is precisely what the squircle cuts away.
+    Read literally, the fade would dim the new seam just as it rounds the bend,
+    which is where it is most plainly supposed to follow the outline. So the
+    measurement is only trusted as far as the silhouette still carries the place
+    it was taken; beyond that the last reading on kept material stands.
+
+    The top seam needs no such help, and gets none: it fades well inside the
+    silhouette, into the shadow of the wallet itself, and that shadow stays.
+    """
+    m = np.asarray(alpha.resize((ART, ART), Image.LANCZOS), dtype=float)
+    i = int(round(SEAM_INSET))
+    kept = {"top": np.nonzero(m[i] > 128)[0], "left": np.nonzero(m[:, i] > 128)[0]}
+    return {e: (int(v[0]), int(v[-1])) for e, v in kept.items()}
 
 
 def seam_path(alpha, inset):
@@ -155,22 +229,23 @@ def _sample(a, x, y):
             + (a[y0 + 1, x0] * (1 - fx) + a[y0 + 1, x0 + 1] * fx) * fy)
 
 
-def stitch_depth(x, y, nx, ny, drop):
+def stitch_depth(x, y, nx, ny, drop, span):
     """How dark a stitch at this point was, where the old seam ran."""
     ax, ay = x * ART / float(S), y * ART / float(S)
     wx, wy = abs(nx) / (abs(nx) + abs(ny)), abs(ny) / (abs(nx) + abs(ny))
-    def look(table, at):
-        at = int(round(at))
-        return table[at] if 0 <= at < len(table) else 0.0
+    def look(edge, at):
+        lo, hi = span[edge]
+        return drop[edge][int(round(min(max(at, lo), hi)))]
     # The normal points inward, so the top edge is the one whose normal points down.
-    down = wy * look(drop["top"], ax) if ny > 0 else 0.0
-    right = wx * look(drop["left"], ay) if nx > 0 else 0.0
+    down = wy * look("top", ax) if ny > 0 else 0.0
+    right = wx * look("left", ay) if nx > 0 else 0.0
     return down + right
 
 
 def lay_seam(art, alpha, drop):
     """Draws the lifted seam again, along the silhouette."""
     scale = S / float(ART)
+    span = carried_span(alpha)
     sx, sy, nx, ny = seam_path(alpha, SEAM_INSET * scale)
     # Begin at the top left corner and centre a stitch on it, so the corner
     # carries its stitch around the bend the way the drawn one does.
@@ -190,7 +265,8 @@ def lay_seam(art, alpha, drop):
             run.append(i)
             continue
         if len(run) > 1:
-            depth = np.mean([stitch_depth(sx[j], sy[j], nx[j], ny[j], drop) for j in run])
+            depth = np.mean([stitch_depth(sx[j], sy[j], nx[j], ny[j], drop, span)
+                             for j in run])
             if depth >= 1.0:
                 pen.line([(sx[j] * over, sy[j] * over) for j in run],
                          fill=int(round(depth)), width=width, joint="curve")
@@ -208,11 +284,9 @@ def build():
     art, drop = lift_seam(Image.open(ART_SOURCE).convert("RGBA"))
     art = art.resize((S, S), Image.LANCZOS)
     icon = Image.new("RGBA", (S, S), (0, 0, 0, 0))
-    # The Sailfish icon fills its square edge to edge, so the mask alone
-    # decides the outline -- its own faint corner rounding disappears well
-    # inside the cut.
     icon.paste(art, (0, 0))
     mask = squircle()
+    icon = fill_to_silhouette(icon, mask)
     icon.putalpha(mask)
     icon = lay_seam(icon, mask, drop)
     for size in SIZES:
