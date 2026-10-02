@@ -197,7 +197,11 @@ def seam_path(alpha, inset):
     cy, cx = (np.array(a.shape) - 1) / 2.0
     ang = np.linspace(0.0, 2.0 * math.pi, RAYS, endpoint=False)
     ux, uy = np.cos(ang), np.sin(ang)
-    radii = np.arange(0.0, S / 2.0, 0.25)[:, None]
+    # Far enough to leave the silhouette on every ray: its corners lie further
+    # from the centre than half the image is wide, and a search that stops at
+    # half the width reports the limit itself as the outline -- a circular arc
+    # cutting across all four corners.
+    radii = np.arange(0.0, S / math.sqrt(2.0) + 1.0, 0.25)[:, None]
     v = _sample(a, cx + radii * ux, cy + radii * uy)
     # Walk every ray outward to where the silhouette ends, and read that crossing
     # off between the two samples around it: whole samples leave the outline
