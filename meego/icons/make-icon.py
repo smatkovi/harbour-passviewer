@@ -48,7 +48,7 @@ it, and the gap the artwork shows there is kept.
 import math
 
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter
 
 HERE = __file__.rsplit("/", 1)[0]
 MASK_SOURCE = HERE + "/mask-icon-l.png"          # a stock icon, for its alpha
@@ -71,6 +71,10 @@ SEAM_REACH = 6              # half a dash period, for closing the gaps when meas
 SEAM_SMOOTH = 8             # and for letting the measurement fade instead of step
 LEATHER_MAX = 140           # brighter than this, or
 LEATHER_SAT = 25            # more coloured than this, is the boarding pass, not the wallet
+LOOSE_FALL = 6              # a stitch is at least this much darker than around it
+LOOSE_AREA = 60             # and is a short dash: no more pixels than this,
+LOOSE_SIZE = 12             # and no longer than this in either direction
+MOUTH = (74, 88, 0, 101)    # top, bottom, left, right of the pocket's mouth, measured here
 FILL_STEPS = 48             # how far the leather may be drawn out to meet the silhouette
 RAYS = 4096                 # how finely the silhouette's outline is walked
 TANGENT = 16                # rays apart, for reading the direction of that outline
@@ -99,7 +103,15 @@ def fill_to_silhouette(art, alpha):
     rgb = np.asarray(art.convert("RGB"), dtype=float)
     have = np.asarray(art.split()[3], dtype=float) >= 250
     want = (np.asarray(alpha, dtype=float) > 0) & ~have
-    for _ in range(FILL_STEPS):
+    rgb = _grow_into(rgb, have, want, FILL_STEPS)
+    out = Image.fromarray(np.clip(rgb, 0, 255).astype(np.uint8)).convert("RGBA")
+    out.putalpha(art.split()[3])
+    return out
+
+
+def _grow_into(rgb, have, want, steps):
+    """Closes the wanted pixels from the ones around them, one ring at a time."""
+    for _ in range(steps):
         if not want.any():
             break
         total = np.zeros_like(rgb)
@@ -113,6 +125,70 @@ def fill_to_silhouette(art, alpha):
         ring = want & (count > 0)
         rgb = np.where(ring[..., None], total / np.maximum(count, 1)[..., None], rgb)
         have, want = have | ring, want & ~ring
+    return rgb
+
+
+def _blobs(flag):
+    """The connected runs of a flag, as lists of their pixels."""
+    seen = np.zeros(flag.shape, bool)
+    out = []
+    for y, x in zip(*np.nonzero(flag)):
+        if seen[y, x]:
+            continue
+        stack, blob = [(y, x)], []
+        seen[y, x] = True
+        while stack:
+            a, b = stack.pop()
+            blob.append((a, b))
+            for c in range(max(a - 1, 0), min(a + 2, flag.shape[0])):
+                for d in range(max(b - 1, 0), min(b + 2, flag.shape[1])):
+                    if flag[c, d] and not seen[c, d]:
+                        seen[c, d] = True
+                        stack.append((c, d))
+        out.append(blob)
+    return out
+
+
+def erase_loose_stitches(art):
+    """Takes out the stitching that is not the seam along the outline.
+
+    The wallet carries more than one seam. The pocket is stitched along its own
+    rounded flank, and the back is stitched around its own rounded corner, and
+    both of those run near the right edge of the icon -- close enough to the new
+    seam to read as a second one beside it, and curving harder, because they
+    follow their own smaller shapes. On the Sailfish square they sit far apart;
+    under the squircle they crowd.
+
+    So every stitch is taken out but the one row along the mouth of the pocket,
+    which lies well inside the icon and is the pocket's own line, not a second
+    outline. A stitch is told from everything else by being short: the outlines
+    it runs beside are long unbroken curves, and a dash is a dozen pixels.
+    """
+    rgb = np.asarray(art.convert("RGB"), dtype=float)
+    lit = Image.fromarray(np.clip(_luma(rgb), 0, 255).astype(np.uint8))
+    ground = np.asarray(lit.filter(ImageFilter.MaxFilter(5)), dtype=float)
+    around = np.dstack([np.asarray(Image.fromarray(np.clip(rgb[:, :, c], 0, 255)
+                                                  .astype(np.uint8))
+                                   .filter(ImageFilter.MaxFilter(5)), dtype=float)
+                        for c in range(3)])
+    loose = ((ground - _luma(rgb) >= LOOSE_FALL)
+             & (rgb.max(2) - rgb.min(2) <= LEATHER_SAT)
+             & (around.max(2) - around.min(2) <= LEATHER_SAT)
+             & (ground <= LEATHER_MAX))
+    top, bottom, left, right = MOUTH
+    want = np.zeros(loose.shape, bool)
+    for blob in _blobs(loose):
+        ys = [a for a, b in blob]
+        xs = [b for a, b in blob]
+        if len(blob) > LOOSE_AREA:
+            continue
+        if max(max(ys) - min(ys), max(xs) - min(xs)) > LOOSE_SIZE:
+            continue
+        if top <= min(ys) and max(ys) <= bottom and left <= min(xs) and max(xs) <= right:
+            continue                                   # the mouth of the pocket stays
+        for a, b in blob:
+            want[a, b] = True
+    rgb = _grow_into(rgb, ~want, want, 8)
     out = Image.fromarray(np.clip(rgb, 0, 255).astype(np.uint8)).convert("RGBA")
     out.putalpha(art.split()[3])
     return out
@@ -288,6 +364,7 @@ def build():
     # The stitches are lifted where they are sharp, in the artwork's own pixels;
     # everything after that happens at 4x.
     art, share = lift_seam(Image.open(ART_SOURCE).convert("RGBA"))
+    art = erase_loose_stitches(art)
     art = art.resize((S, S), Image.LANCZOS)
     icon = Image.new("RGBA", (S, S), (0, 0, 0, 0))
     icon.paste(art, (0, 0))
